@@ -1,343 +1,408 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { useDropzone } from 'react-dropzone';
+import React, { useState, useEffect } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
-import { Box, Button, Typography, IconButton, Slider, Paper, ToggleButton, ToggleButtonGroup, Dialog, DialogTitle, DialogContent, DialogActions, TextField } from '@mui/material';
+import { Box, Button, IconButton, Typography, Paper, Dialog, DialogTitle, DialogContent, DialogActions, TextField } from '@mui/material';
 import ZoomInIcon from '@mui/icons-material/ZoomIn';
 import ZoomOutIcon from '@mui/icons-material/ZoomOut';
+import NavigateBeforeIcon from '@mui/icons-material/NavigateBefore';
+import NavigateNextIcon from '@mui/icons-material/NavigateNext';
+import UploadFileIcon from '@mui/icons-material/UploadFile';
+import { useDropzone } from 'react-dropzone';
+import 'react-pdf/dist/Page/AnnotationLayer.css';
+import 'react-pdf/dist/Page/TextLayer.css';
 
-pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.js`;
+// Set workerSrc for pdfjs
+pdfjs.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjs.version}/pdf.worker.min.js`;
 
-const SUPPORTED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif'];
+const samplePDF =
+  'https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf';
 
-const App: React.FC = () => {
-  const [file, setFile] = useState<File | null>(null);
-  const [numPages, setNumPages] = useState<number>(1);
-  const [pageNumber, setPageNumber] = useState<number>(1);
-  const [scale, setScale] = useState<number>(1.0);
-  const [error, setError] = useState<string | null>(null);
-  // Measurement tool state
-  const [measureStart, setMeasureStart] = useState<{ x: number; y: number } | null>(null);
-  const [measureEnd, setMeasureEnd] = useState<{ x: number; y: number } | null>(null);
-  const [containerRect, setContainerRect] = useState<DOMRect | null>(null);
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  // Calibration and units
-  const [units, setUnits] = useState<'imperial' | 'metric'>('imperial');
-  const [calibration, setCalibration] = useState<{ px: number; real: number } | null>(null);
-  const [calibrateOpen, setCalibrateOpen] = useState(false);
-  const [calibrateValue, setCalibrateValue] = useState('');
+function App() {
+  const [numPages, setNumPages] = useState<number | null>(null);
+  const [pageNumber, setPageNumber] = useState(1);
+  const [calibrationMode, setCalibrationMode] = useState(false);
+  const [calibrationPoints, setCalibrationPoints] = useState<{x: number, y: number}[]>([]);
+  const [calibrationDialogOpen, setCalibrationDialogOpen] = useState(false);
+  const [realLength, setRealLength] = useState('');
+  const [scale, setScale] = useState<number | null>(null); // pixels per unit
+  const [calibrationError, setCalibrationError] = useState('');
+  const [open, setOpen] = useState(false);
+  const [pdfFile, setPdfFile] = useState<File | null>(null);
+  const [pdfUrl, setPdfUrl] = useState<string | null>(samplePDF);
 
-  useEffect(() => {
-    if (containerRef.current) {
-      setContainerRect(containerRef.current.getBoundingClientRect());
+  // Measurement overlay state
+  const [measuring, setMeasuring] = useState(false);
+  const [measurementPoints, setMeasurementPoints] = useState<{x: number, y: number}[]>([]);
+  const [measurements, setMeasurements] = useState<{points: {x: number, y: number}[], length: number}[]>([]);
+
+  function onDocumentLoadSuccess({ numPages }: { numPages: number }) {
+    setNumPages(numPages);
+    setPageNumber(1);
+  }
+
+  const handlePrevPage = () => setPageNumber((prev) => Math.max((prev ?? 1) - 1, 1));
+  const handleNextPage = () =>
+    setPageNumber((prev) => (numPages ? Math.min((prev ?? 1) + 1, numPages) : (prev ?? 1)));
+  const handleZoomIn = () => setScale((prev) => Math.min((prev ?? 1.0) + 0.2, 3));
+  const handleZoomOut = () => setScale((prev) => Math.max((prev ?? 1.0) - 0.2, 0.5));
+
+  // Dropzone logic
+  const onDrop = React.useCallback((acceptedFiles: File[]) => {
+    if (acceptedFiles && acceptedFiles[0]) {
+      setPdfFile(acceptedFiles[0]);
+      setPdfUrl(URL.createObjectURL(acceptedFiles[0]));
+      setOpen(false);
     }
-  }, [file, scale, pageNumber]);
-
-  // Open calibration dialog after a measurement
-  useEffect(() => {
-    if (measureStart && measureEnd && !calibration) {
-      setCalibrateOpen(true);
-    }
-  }, [measureStart, measureEnd, calibration]);
-
-  const onDrop = (acceptedFiles: File[]) => {
-    if (acceptedFiles.length > 0) {
-      setFile(acceptedFiles[0]);
-      setPageNumber(1);
-      setScale(1.0);
-      setError(null);
-    }
-  };
-
+  }, []);
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
-    accept: {
-      'application/pdf': ['.pdf'],
-      'image/jpeg': ['.jpeg', '.jpg'],
-      'image/png': ['.png'],
-      'image/gif': ['.gif'],
-    },
+    accept: { 'application/pdf': [] },
     multiple: false,
   });
 
-  const onDocumentLoadSuccess = ({ numPages }: { numPages: number }) => {
-    setNumPages(numPages);
-    setPageNumber(1);
-  };
-
-  // Helper to get mouse position relative to the viewer container
-  const getRelativePos = (e: React.MouseEvent) => {
-    if (!containerRect) return { x: 0, y: 0 };
-    return {
-      x: (e.clientX - containerRect.left) / scale,
-      y: (e.clientY - containerRect.top) / scale,
-    };
-  };
-
-  // Handle click for measurement
-  const handleViewerClick = (e: React.MouseEvent) => {
-    if (!containerRect) return;
-    const pos = getRelativePos(e);
-    if (!measureStart) {
-      setMeasureStart(pos);
-      setMeasureEnd(null);
-    } else if (!measureEnd) {
-      setMeasureEnd(pos);
-    } else {
-      setMeasureStart(pos);
-      setMeasureEnd(null);
+  // File picker fallback
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setPdfFile(file);
+      setPdfUrl(URL.createObjectURL(file));
+      setOpen(false);
     }
   };
 
-  // Calculate pixel distance
-  const getDistance = () => {
-    if (!measureStart || !measureEnd) return 0;
-    const dx = measureEnd.x - measureStart.x;
-    const dy = measureEnd.y - measureStart.y;
-    return Math.sqrt(dx * dx + dy * dy);
+  // Helper to get click coordinates relative to the PDF container
+  const handlePdfClick = (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
+    if (!calibrationMode) return;
+    const rect = (e.target as HTMLDivElement).getBoundingClientRect();
+    const x = (e.clientX - rect.left) / scaleFactor;
+    const y = (e.clientY - rect.top) / scaleFactor;
+    setCalibrationPoints((prev) => [...prev, { x, y }]);
   };
 
-  // Calculate real-world distance
-  const getRealDistance = () => {
-    if (!measureStart || !measureEnd) return 0;
-    const pxDist = getDistance();
-    if (!calibration) return 0;
-    return (pxDist / calibration.px) * calibration.real;
+  // Handle click for measurement overlay
+  const handleMeasurementClick = (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
+    if (!measuring || !scale) return;
+    const rect = (e.target as HTMLDivElement).getBoundingClientRect();
+    const x = (e.clientX - rect.left) / scaleFactor;
+    const y = (e.clientY - rect.top) / scaleFactor;
+    setMeasurementPoints((prev) => [...prev, { x, y }]);
   };
 
-  // Handle calibration submit
-  const handleCalibrate = () => {
-    const pxDist = getDistance();
-    const real = parseFloat(calibrateValue);
-    if (pxDist > 0 && real > 0) {
-      setCalibration({ px: pxDist, real });
-      setCalibrateOpen(false);
-      setCalibrateValue('');
+  // Handle double-click to finish polyline measurement
+  const handleMeasurementDoubleClick = () => {
+    if (!measuring || !scale || measurementPoints.length < 2) return;
+    // Calculate total real-world length
+    let total = 0;
+    for (let i = 1; i < measurementPoints.length; i++) {
+      const p1 = measurementPoints[i - 1];
+      const p2 = measurementPoints[i];
+      const pixelDist = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2);
+      total += pixelDist / scale;
     }
+    setMeasurements((prev) => [...prev, { points: [...measurementPoints], length: total }]);
+    setMeasurementPoints([]);
+    setMeasuring(false);
   };
 
-  // Handle unit toggle
-  const handleUnitChange = (_: any, newUnits: 'imperial' | 'metric' | null) => {
-    if (newUnits) setUnits(newUnits);
+  // Calculate scale factor for overlay (syncs with PDF zoom)
+  const scaleFactor = scale || 1.0;
+
+  // When two points are selected, open dialog for real-world length
+  useEffect(() => {
+    if (calibrationMode && calibrationPoints.length === 2) {
+      setCalibrationDialogOpen(true);
+    }
+  }, [calibrationPoints, calibrationMode]);
+
+  // Handle calibration dialog submit
+  const handleCalibrationSubmit = () => {
+    const len = parseFloat(realLength);
+    if (isNaN(len) || len <= 0) {
+      setCalibrationError('Please enter a valid positive number.');
+      return;
+    }
+    // Calculate pixel distance
+    const [p1, p2] = calibrationPoints;
+    const pixelDist = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2);
+    setScale(pixelDist / len); // pixels per unit
+    setCalibrationDialogOpen(false);
+    setCalibrationMode(false);
+    setCalibrationPoints([]);
+    setRealLength('');
+    setCalibrationError('');
   };
 
-  // Overlay SVG for measurement
-  const renderMeasurementOverlay = () => {
-    if (!containerRect) return null;
+  // Render calibration overlay (line between two points)
+  const renderCalibrationOverlay = () => {
+    if (calibrationPoints.length === 0) return null;
+    const points = calibrationPoints.map(p => `${p.x * scaleFactor},${p.y * scaleFactor}`).join(' ');
     return (
       <svg
-        width={containerRect.width}
-        height={containerRect.height}
-        style={{
-          position: 'absolute',
-          top: 0,
-          left: 0,
-          pointerEvents: 'none',
-          zIndex: 20,
-        }}
+        style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', width: '100%', height: '100%' }}
       >
-        {measureStart && measureEnd && (
-          <>
+        {calibrationPoints.length === 2 ? (
+          <line
+            x1={calibrationPoints[0].x * scaleFactor}
+            y1={calibrationPoints[0].y * scaleFactor}
+            x2={calibrationPoints[1].x * scaleFactor}
+            y2={calibrationPoints[1].y * scaleFactor}
+            stroke="#1976d2"
+            strokeWidth={2}
+          />
+        ) : null}
+        {calibrationPoints.map((p, i) => (
+          <circle
+            key={i}
+            cx={p.x * scaleFactor}
+            cy={p.y * scaleFactor}
+            r={6}
+            fill="#1976d2"
+            stroke="#fff"
+            strokeWidth={2}
+          />
+        ))}
+      </svg>
+    );
+  };
+
+  // Render measurement overlay (lines, points, lengths)
+  const renderMeasurementOverlay = () => {
+    if (!scale) return null;
+    return (
+      <svg
+        style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none', width: '100%', height: '100%' }}
+      >
+        {/* Existing measurements */}
+        {measurements.map((m, idx) => (
+          <g key={idx}>
+            {m.points.map((p, i) =>
+              i > 0 ? (
+                <line
+                  key={i}
+                  x1={m.points[i - 1].x * scaleFactor}
+                  y1={m.points[i - 1].y * scaleFactor}
+                  x2={p.x * scaleFactor}
+                  y2={p.y * scaleFactor}
+                  stroke="#43a047"
+                  strokeWidth={2}
+                />
+              ) : null
+            )}
+            {/* Show total length at last point */}
+            {m.points.length > 1 && (
+              <text
+                x={m.points[m.points.length - 1].x * scaleFactor + 8}
+                y={m.points[m.points.length - 1].y * scaleFactor - 8}
+                fill="#43a047"
+                fontSize={16}
+                fontWeight="bold"
+                stroke="#fff"
+                strokeWidth={0.5}
+              >
+                {m.length.toFixed(2)} units
+              </text>
+            )}
+          </g>
+        ))}
+        {/* Current measurement in progress */}
+        {measurementPoints.map((p, i) =>
+          i > 0 ? (
             <line
-              x1={measureStart.x * scale}
-              y1={measureStart.y * scale}
-              x2={measureEnd.x * scale}
-              y2={measureEnd.y * scale}
-              stroke="red"
+              key={i}
+              x1={measurementPoints[i - 1].x * scaleFactor}
+              y1={measurementPoints[i - 1].y * scaleFactor}
+              x2={p.x * scaleFactor}
+              y2={p.y * scaleFactor}
+              stroke="#1976d2"
               strokeWidth={2}
+              strokeDasharray="4 2"
             />
-            <circle
-              cx={measureStart.x * scale}
-              cy={measureStart.y * scale}
-              r={4}
-              fill="blue"
-            />
-            <circle
-              cx={measureEnd.x * scale}
-              cy={measureEnd.y * scale}
-              r={4}
-              fill="blue"
-            />
-            <text
-              x={(measureStart.x * scale + measureEnd.x * scale) / 2}
-              y={(measureStart.y * scale + measureEnd.y * scale) / 2 - 10}
-              fill="black"
-              fontSize={16}
-              textAnchor="middle"
-              stroke="white"
-              strokeWidth={0.5}
-            >
-              {calibration
-                ? `${getRealDistance().toFixed(2)} ${units === 'imperial' ? 'ft' : 'm'}`
-                : `${getDistance().toFixed(1)} px`}
-            </text>
-          </>
+          ) : null
+        )}
+        {measurementPoints.map((p, i) => (
+          <circle
+            key={i}
+            cx={p.x * scaleFactor}
+            cy={p.y * scaleFactor}
+            r={6}
+            fill="#1976d2"
+            stroke="#fff"
+            strokeWidth={2}
+          />
+        ))}
+        {/* Show current length at last point */}
+        {measurementPoints.length > 1 && (
+          <text
+            x={measurementPoints[measurementPoints.length - 1].x * scaleFactor + 8}
+            y={measurementPoints[measurementPoints.length - 1].y * scaleFactor - 8}
+            fill="#1976d2"
+            fontSize={16}
+            fontWeight="bold"
+            stroke="#fff"
+            strokeWidth={0.5}
+          >
+            {(() => {
+              let total = 0;
+              for (let i = 1; i < measurementPoints.length; i++) {
+                const p1 = measurementPoints[i - 1];
+                const p2 = measurementPoints[i];
+                const pixelDist = Math.sqrt((p2.x - p1.x) ** 2 + (p2.y - p1.y) ** 2);
+                total += pixelDist / scale;
+              }
+              return total.toFixed(2) + ' units';
+            })()}
+          </text>
         )}
       </svg>
     );
   };
 
-  const renderViewer = () => {
-    if (!file) return null;
-    // Wrap viewer in a ref container for overlay
-    return (
-      <Box
-        sx={{ mt: 2, display: 'flex', flexDirection: 'column', alignItems: 'center', position: 'relative' }}
-        ref={containerRef}
-        onClick={handleViewerClick}
-        style={{ cursor: 'crosshair' }}
-      >
-        {/* Existing PDF or image rendering logic */}
-        {file.type === 'application/pdf' ? (
-          <Document
-            file={file}
-            onLoadSuccess={onDocumentLoadSuccess}
-            onLoadError={() => setError('Failed to load PDF.')}
-          >
-            <Page pageNumber={pageNumber} scale={scale} />
-          </Document>
-        ) : (
-          <Paper elevation={2} sx={{ p: 1 }}>
-            <img
-              src={URL.createObjectURL(file)}
-              alt="Uploaded preview"
-              style={{ maxWidth: 600 * scale, maxHeight: 800 * scale, transition: 'all 0.2s' }}
-            />
-          </Paper>
-        )}
-        {/* Overlay for measurement */}
-        {renderMeasurementOverlay()}
-        {/* Floating Controls Toolbar */}
-        <Box
-          sx={{
-            position: 'absolute',
-            top: 16,
-            right: 16,
-            zIndex: 10,
-            bgcolor: 'rgba(255,255,255,0.85)',
-            borderRadius: 2,
-            boxShadow: 3,
-            p: 1,
-            display: 'flex',
-            flexDirection: 'column',
-            alignItems: 'center',
-            gap: 1,
-          }}
-        >
-          <Box sx={{ display: 'flex', alignItems: 'center' }}>
-            <IconButton onClick={() => setScale(s => Math.max(0.5, s - 0.1))}><ZoomOutIcon /></IconButton>
-            <Slider
-              value={scale}
-              min={0.5}
-              max={2.0}
-              step={0.1}
-              onChange={(_, value) => setScale(value as number)}
-              sx={{ width: 100, mx: 1 }}
-            />
-            <IconButton onClick={() => setScale(s => Math.min(2.0, s + 0.1))}><ZoomInIcon /></IconButton>
-          </Box>
-          <Box sx={{ display: 'flex', alignItems: 'center', mt: 1 }}>
-            <Button
-              variant="outlined"
-              onClick={() => setPageNumber(p => Math.max(1, p - 1))}
-              disabled={pageNumber <= 1}
-              sx={{ mr: 1 }}
-              size="small"
-            >
-              Previous
-            </Button>
-            <Typography component="span" sx={{ mx: 1, fontSize: 14 }}>
-              Page {pageNumber} of {numPages}
-            </Typography>
-            <Button
-              variant="outlined"
-              onClick={() => setPageNumber(p => Math.min(numPages, p + 1))}
-              disabled={pageNumber >= numPages}
-              sx={{ ml: 1 }}
-              size="small"
-            >
-              Next
-            </Button>
-          </Box>
-        </Box>
-      </Box>
-    );
-  };
-
   return (
-    <Box sx={{ p: 4, maxWidth: 800, mx: 'auto' }}>
-      <Typography variant="h4" gutterBottom>
-        Material Takeoff Tool: Blueprint Viewer
-      </Typography>
-      {/* Unit toggle and calibration status */}
-      <Box sx={{ display: 'flex', alignItems: 'center', mb: 2, gap: 2 }}>
-        <ToggleButtonGroup
-          value={units}
-          exclusive
-          onChange={handleUnitChange}
-          size="small"
+    <Box sx={{ minHeight: '100vh', bgcolor: '#f5f5f5', p: 4 }}>
+      <Paper elevation={3} sx={{ maxWidth: 800, mx: 'auto', p: 2, position: 'relative' }}>
+        <Box display="flex" justifyContent="space-between" alignItems="center" mb={2}>
+          <Typography variant="h5" align="center">
+            PDF Blueprint Viewer
+          </Typography>
+          <Button
+            variant="contained"
+            startIcon={<UploadFileIcon />}
+            onClick={() => setOpen(true)}
+            sx={{ ml: 2 }}
+          >
+            Open PDF
+          </Button>
+          <Button
+            variant={calibrationMode ? 'contained' : 'outlined'}
+            color={calibrationMode ? 'secondary' : 'primary'}
+            onClick={() => {
+              setCalibrationMode((prev) => !prev);
+              setCalibrationPoints([]);
+              setCalibrationError('');
+            }}
+            sx={{ ml: 2 }}
+          >
+            {calibrationMode ? 'Cancel Calibration' : 'Calibrate Scale'}
+          </Button>
+          <Button
+            variant={measuring ? 'contained' : 'outlined'}
+            color={measuring ? 'secondary' : 'primary'}
+            onClick={() => {
+              setMeasuring((prev) => !prev);
+              setMeasurementPoints([]);
+            }}
+            sx={{ ml: 2 }}
+            disabled={!scale}
+          >
+            {measuring ? 'Cancel Measurement' : 'Measure'}
+          </Button>
+        </Box>
+        <Box display="flex" justifyContent="center" alignItems="center" mb={2}>
+          <IconButton onClick={handlePrevPage} disabled={pageNumber <= 1}>
+            <NavigateBeforeIcon />
+          </IconButton>
+          <Typography sx={{ mx: 2 }}>
+            Page {pageNumber} {numPages ? `/ ${numPages}` : ''}
+          </Typography>
+          <IconButton
+            onClick={handleNextPage}
+            disabled={numPages ? pageNumber >= numPages : true}
+          >
+            <NavigateNextIcon />
+          </IconButton>
+          <IconButton onClick={handleZoomOut} sx={{ ml: 4 }}>
+            <ZoomOutIcon />
+          </IconButton>
+          <IconButton onClick={handleZoomIn}>
+            <ZoomInIcon />
+          </IconButton>
+        </Box>
+        <Box
+          display="flex"
+          justifyContent="center"
+          alignItems="center"
+          position="relative"
+          onClick={calibrationMode ? handlePdfClick : measuring ? handleMeasurementClick : undefined}
+          onDoubleClick={measuring ? handleMeasurementDoubleClick : undefined}
+          style={{ cursor: calibrationMode || measuring ? 'crosshair' : 'default' }}
         >
-          <ToggleButton value="imperial">Imperial (ft)</ToggleButton>
-          <ToggleButton value="metric">Metric (m)</ToggleButton>
-        </ToggleButtonGroup>
-        {calibration && (
-          <Typography variant="body2" color="success.main">
-            Calibrated: {calibration.real} {units === 'imperial' ? 'ft' : 'm'} = {calibration.px.toFixed(1)} px
-          </Typography>
-        )}
-        {!calibration && (
-          <Button variant="outlined" size="small" onClick={() => setCalibrateOpen(true)}>
-            Calibrate
-          </Button>
-        )}
-        {(measureStart || measureEnd) && (
-          <Button variant="outlined" size="small" color="secondary" onClick={() => { setMeasureStart(null); setMeasureEnd(null); }}>
-            Clear Measurement
-          </Button>
-        )}
-      </Box>
+          <Document
+            file={pdfUrl}
+            onLoadSuccess={onDocumentLoadSuccess}
+            loading={<Typography>Loading PDF...</Typography>}
+            error={<Typography color="error">Failed to load PDF.</Typography>}
+          >
+            <Page pageNumber={pageNumber} scale={scaleFactor} />
+          </Document>
+          {calibrationMode && renderCalibrationOverlay()}
+          {renderMeasurementOverlay()}
+        </Box>
+      </Paper>
       {/* Calibration dialog */}
-      <Dialog open={calibrateOpen} onClose={() => setCalibrateOpen(false)}>
-        <DialogTitle>Calibrate Measurement</DialogTitle>
+      <Dialog open={calibrationDialogOpen} onClose={() => setCalibrationDialogOpen(false)}>
+        <DialogTitle>Enter Real-World Length</DialogTitle>
         <DialogContent>
-          <Typography gutterBottom>
-            Enter the real-world distance for the measured line:
-          </Typography>
           <TextField
             autoFocus
             margin="dense"
-            label={`Distance (${units === 'imperial' ? 'ft' : 'm'})`}
+            label="Length (e.g., feet, meters)"
             type="number"
             fullWidth
-            value={calibrateValue}
-            onChange={e => setCalibrateValue(e.target.value)}
+            value={realLength}
+            onChange={e => setRealLength(e.target.value)}
+            error={!!calibrationError}
+            helperText={calibrationError}
           />
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setCalibrateOpen(false)}>Cancel</Button>
-          <Button onClick={handleCalibrate} disabled={!calibrateValue}>Set Calibration</Button>
+          <Button onClick={() => setCalibrationDialogOpen(false)}>Cancel</Button>
+          <Button onClick={handleCalibrationSubmit} variant="contained">Set Scale</Button>
         </DialogActions>
       </Dialog>
-      {/* File drop and viewer */}
-      <Box
-        {...getRootProps()}
-        sx={{
-          border: '2px dashed #888',
-          borderRadius: 2,
-          p: 4,
-          textAlign: 'center',
-          bgcolor: isDragActive ? '#f0f0f0' : '#fafafa',
-          cursor: 'pointer',
-        }}
-      >
-        <input {...getInputProps()} />
-        <Typography>
-          {isDragActive ? 'Drop the file here...' : 'Drag & drop a PDF or image, or click to select'}
-        </Typography>
-      </Box>
-      {error && <Typography color="error" sx={{ mt: 2 }}>{error}</Typography>}
-      {renderViewer()}
+      <Dialog open={open} onClose={() => setOpen(false)}>
+        <DialogTitle>Upload or Drag & Drop PDF</DialogTitle>
+        <DialogContent>
+          <Box
+            {...getRootProps()}
+            sx={{
+              border: '2px dashed #1976d2',
+              borderRadius: 2,
+              p: 3,
+              textAlign: 'center',
+              bgcolor: isDragActive ? '#e3f2fd' : '#fafafa',
+              cursor: 'pointer',
+              mb: 2,
+            }}
+          >
+            <input {...getInputProps()} />
+            {isDragActive ? (
+              <Typography>Drop the PDF here ...</Typography>
+            ) : (
+              <Typography>
+                Drag & drop a PDF file here, or click to select a file
+              </Typography>
+            )}
+          </Box>
+          <Typography align="center" variant="body2" color="textSecondary">
+            OR
+          </Typography>
+          <Box display="flex" justifyContent="center" mt={2}>
+            <Button variant="outlined" component="label">
+              Choose PDF
+              <input
+                type="file"
+                accept="application/pdf"
+                hidden
+                onChange={handleFileChange}
+              />
+            </Button>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpen(false)}>Cancel</Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
-};
+}
 
 export default App;
